@@ -1,0 +1,24 @@
+[Unit]
+Description=UptimeSquirrel Monitoring Agent
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/uptimesquirrel-agent
+Restart=always
+RestartSec=30
+User=root
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=uptimesquirrel-agent
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/uptimesquirrel /var/log/uptimesquirrel /etc/uptimesquirrel
+
+[Install]
+WantedBy=multi-user.target

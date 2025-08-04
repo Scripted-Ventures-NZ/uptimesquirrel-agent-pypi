@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "uptimesquirrel-agent"
+dynamic = ["version"]
+description = "System monitoring agent for UptimeSquirrel"
+readme = "README.md"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "UptimeSquirrel", email = "support@uptimesquirrel.com"},
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Monitoring",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: POSIX :: Linux",
+]
+
+dependencies = [
+    "psutil>=5.8.0",
+    "requests>=2.25.0",
+    "configparser>=5.0.0",
+]
+
+[project.optional-dependencies]
+snmp = ["pysnmp>=4.4.12"]
+
+[project.urls]
+Homepage = "https://uptimesquirrel.com"
+Documentation = "https://docs.uptimesquirrel.com/agent"
+Repository = "https://github.com/uptimesquirrel/agent"
+Issues = "https://github.com/uptimesquirrel/agent/issues"
+
+[project.scripts]
+uptimesquirrel-agent = "uptimesquirrel_agent.agent:main"

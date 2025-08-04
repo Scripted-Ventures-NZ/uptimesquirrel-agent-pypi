@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include uptimesquirrel_agent/config *
+recursive-include uptimesquirrel_agent/systemd *
+global-exclude *.pyc
+global-exclude __pycache__
