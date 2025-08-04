@@ -48,6 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'testpypi'
     environment: testpypi
+    permissions:
+      id-token: write  # Required for trusted publishing
     
     steps:
     - name: Download artifacts
@@ -56,26 +58,18 @@ jobs:
         name: dist
         path: dist/
     
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'
-    
-    - name: Install twine
-      run: pip install twine
-    
     - name: Publish to TestPyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
-      run: |
-        twine upload --repository testpypi dist/*
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        repository-url: https://test.pypi.org/legacy/
 
   publish-pypi:
     needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'pypi')
     environment: pypi
+    permissions:
+      id-token: write  # Required for trusted publishing
     
     steps:
     - name: Download artifacts
@@ -84,17 +78,5 @@ jobs:
         name: dist
         path: dist/
     
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'
-    
-    - name: Install twine
-      run: pip install twine
-    
     - name: Publish to PyPI
-      env:
-        TWINE_USERNAME: __token__
-        TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-      run: |
-        twine upload dist/*
+      uses: pypa/gh-action-pypi-publish@release/v1
