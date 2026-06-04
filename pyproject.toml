@@ -1,45 +1,56 @@
 [build-system]
-requires = ["setuptools>=45", "wheel", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "uptimesquirrel-agent"
-dynamic = ["version"]
-description = "System monitoring agent for UptimeSquirrel"
+version = "2.1.15"
+description = "UptimeSquirrel system monitoring agent — collects metrics and executes synthetic checks."
 readme = "README.md"
-requires-python = ">=3.7"
-license = {text = "MIT"}
+requires-python = ">=3.9"
+license = { text = "Proprietary" }
 authors = [
-    {name = "UptimeSquirrel", email = "support@uptimesquirrel.com"},
+    { name = "Scripted Ventures", email = "support@uptimesquirrel.com" },
 ]
+keywords = ["monitoring", "uptime", "metrics", "agent", "synthetic-checks", "observability"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: No Input/Output (Daemon)",
     "Intended Audience :: System Administrators",
-    "Topic :: System :: Monitoring",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Monitoring",
+    "Topic :: System :: Networking :: Monitoring",
 ]
 
 dependencies = [
-    "psutil>=5.8.0",
-    "requests>=2.25.0",
-    "configparser>=5.0.0",
+    "aiohttp>=3.9",
+    "certifi>=2024.2.2",
+    "psutil>=5.9",
+    "requests>=2.31",
+    "urllib3>=2.0",
 ]
 
 [project.optional-dependencies]
-snmp = ["pysnmp>=4.4.12"]
+snmp = ["pysnmp>=5.0"]
 
 [project.urls]
 Homepage = "https://uptimesquirrel.com"
 Documentation = "https://docs.uptimesquirrel.com/agent"
-Repository = "https://github.com/uptimesquirrel/agent"
-Issues = "https://github.com/uptimesquirrel/agent/issues"
+Repository = "https://github.com/Scripted-Ventures-NZ/uptimesquirrel-agent-pypi"
+Issues = "https://github.com/Scripted-Ventures-NZ/UptimeSquirrel/issues"
 
 [project.scripts]
 uptimesquirrel-agent = "uptimesquirrel_agent.agent:main"
+
+[tool.setuptools.packages.find]
+include = ["uptimesquirrel_agent*"]
+exclude = ["test-env*", "tests*"]

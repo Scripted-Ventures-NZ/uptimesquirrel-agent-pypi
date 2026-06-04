@@ -1,7 +1,38 @@
 #!/usr/bin/env python3
 """
-UptimeSquirrel System Monitoring Agent v1.2.0
-Collects system metrics and reports to UptimeSquirrel API
+UptimeSquirrel System Monitoring Agent v2.1.15
+Collects system metrics and executes checks for UptimeSquirrel
+
+New in v2.1.15:
+- Fix Linux ping RTT parser: regex now matches both Linux ("mdev") and
+  macOS/BSD ("stddev") summary lines. v2.1.14 only matched stddev so Linux
+  hosts reported NULL latency on every ping check.
+
+New in v2.1.14:
+- Fix silent task drop on capacity overflow, fix ping RTT reporting, point default URL to agent-api host
+
+New in v2.1.13:
+- Exclude virtual/read-only filesystems (squashfs, overlay, tmpfs, /dev/loop, etc.)
+  from disk metrics so /snap mounts no longer trigger false disk_high alerts
+- Log the first successful metrics report at INFO so installers can detect success
+- Fix logging being silently stuck at WARNING (failed snmp import implicitly
+  configured root logging before basicConfig); INFO logs now appear correctly
+
+New in v2.1.1:
+- Fixed field name normalization for result submission
+- Improved error handling for check execution
+- Better compatibility with Windows agent format
+
+New in v2.0.8:
+- Auto-detect private/local IPs and skip SSL verification
+- Support for expected status codes in HTTP checks
+- Improved error messages for failed checks
+
+New in v2.0.0:
+- Check execution capabilities (HTTP, TCP, ICMP)
+- Agent proxy support for Business/Enterprise plans
+- Task management for concurrent check execution
+- Enhanced capability reporting
 
 New in v1.2.0:
 - Remote threshold configuration from server
@@ -35,18 +66,34 @@ from urllib3.util.retry import Retry
 from collections import deque
 import threading
 
+# Optional check execution support
+try:
+    from .task_manager import TaskManager
+    CHECK_EXECUTION_AVAILABLE = True
+except ImportError:
+    CHECK_EXECUTION_AVAILABLE = False
+    logging.info("Check execution support not available. Metrics-only mode.")
+
 # Optional SNMP support
 try:
-    from snmp_collector import SNMPCollector, SNMPDevice, SNMPVersion, load_snmp_config
+    from .snmp_collector import SNMPCollector, SNMPDevice, SNMPVersion, load_snmp_config
     SNMP_AVAILABLE = True
 except ImportError:
     SNMP_AVAILABLE = False
     logging.info("SNMP support not available. Install pysnmp to enable SNMP monitoring.")
 
 # Version
-__version__ = "1.2.7"
+__version__ = "2.1.15"
 
-# Configure logging
+# Configure logging.
+# The optional snmp_collector import above fails on stock installs, and its
+# `except` branch calls logging.info() before this runs, which implicitly
+# configures root logging at WARNING with the default format. That would make
+# this basicConfig a no-op and suppress all INFO output. Remove any
+# pre-installed root handler first so our config wins (works on Python 3.6+;
+# basicConfig(force=True) would require 3.8+).
+for _h in logging.root.handlers[:]:
+    logging.root.removeHandler(_h)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -104,7 +151,30 @@ class MemoryCollector(MetricCollector):
 
 class DiskCollector(MetricCollector):
     """Collects disk usage metrics"""
-    
+
+    # Virtual / pseudo / read-only filesystems that should never trigger
+    # disk-full alerts. squashfs covers snap mounts (always 100% by design);
+    # the rest are kernel/RAM-backed mounts that are not real storage.
+    EXCLUDED_FSTYPES = {
+        'squashfs', 'overlay', 'aufs', 'tmpfs', 'devtmpfs', 'ramfs',
+        'iso9660', 'proc', 'sysfs', 'cgroup', 'cgroup2', 'autofs', 'mqueue',
+        'debugfs', 'tracefs', 'fusectl', 'devpts', 'securityfs', 'pstore',
+        'bpf', 'configfs', 'hugetlbfs', 'nsfs', 'binfmt_misc', 'fuse.snapfuse',
+    }
+
+    @classmethod
+    def _should_skip_partition(cls, partition) -> bool:
+        """Skip virtual, read-only, and loopback mounts (e.g. /snap squashfs)."""
+        if not partition.fstype:
+            return True
+        if partition.fstype in cls.EXCLUDED_FSTYPES:
+            return True
+        if partition.device.startswith('/dev/loop'):
+            return True
+        if partition.mountpoint.startswith('/snap') or partition.mountpoint.startswith('/var/lib/snapd'):
+            return True
+        return False
+
     def __init__(self, config_dir: str = None):
         self.config_dir = config_dir or "/etc/uptimesquirrel"
         self.disk_config = self.load_disk_config()
@@ -136,7 +206,7 @@ class DiskCollector(MetricCollector):
         # Discover all disks
         discovered_disks = {}
         for partition in psutil.disk_partitions():
-            if partition.fstype:
+            if not self._should_skip_partition(partition):
                 try:
                     usage = psutil.disk_usage(partition.mountpoint)
                     # Skip tiny partitions (< 1GB)
@@ -192,7 +262,7 @@ class DiskCollector(MetricCollector):
         disk_configs = self.disk_config.get("disks", {})
         
         for partition in psutil.disk_partitions():
-            if partition.fstype:
+            if not self._should_skip_partition(partition):
                 # Check if this disk is in our config and enabled
                 disk_config = disk_configs.get(partition.mountpoint, {})
                 if not disk_config.get("enabled", True):
@@ -637,10 +707,22 @@ class UptimeSquirrelAgent:
         self.threshold_version = 0  # Track threshold version to avoid unnecessary updates
         logger.info(f"Agent initialized with threshold version: {self.threshold_version}")
         
+        # Check execution support (v2.0+)
+        self.task_manager = None
+        self.check_execution_enabled = False
+        if CHECK_EXECUTION_AVAILABLE:
+            # Check if check execution is enabled in config
+            self.check_execution_enabled = self.config.getboolean(
+                'agent', 'check_execution_enabled', fallback=True
+            )
+            if self.check_execution_enabled:
+                self._init_task_manager()
+        
         # Metric buffering
         self.metric_buffer = MetricBuffer()
         self.consecutive_failures = 0
         self.max_consecutive_failures = 5
+        self.first_metrics_reported = False  # log first success at INFO for installers
         
         # Initialize collectors
         # Always use /etc/uptimesquirrel for disk config
@@ -778,6 +860,30 @@ class UptimeSquirrelAgent:
             self.collectors['snmp'] = SNMPCollector(snmp_devices)
         else:
             logger.info("No SNMP devices configured")
+    
+    def _init_task_manager(self):
+        """Initialize task manager for check execution"""
+        try:
+            agent_config = {
+                'api_url': self.api_url,
+                'agent_key': self.agent_key,
+                'agent_id': self.config.get('agent', 'agent_id', fallback=None),
+                'hostname': self.hostname,
+                'home_region': self.config.get('agent', 'home_region', fallback='us-west-2'),
+                'max_concurrent_checks': self.config.getint('agent', 'max_concurrent_checks', fallback=10),
+                'agent_version': __version__
+            }
+            
+            self.task_manager = TaskManager(agent_config)
+            logger.info("Task manager initialized for check execution")
+            
+            # Report capabilities on startup
+            self.task_manager.update_capabilities()
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize task manager: {e}")
+            self.task_manager = None
+            self.check_execution_enabled = False
     
     def fetch_remote_config(self):
         """Fetch configuration from server"""
@@ -1030,6 +1136,17 @@ class UptimeSquirrelAgent:
             )
             response.raise_for_status()
             
+            # Process any pending tasks in the response (for check execution)
+            if self.task_manager:
+                try:
+                    response_data = response.json()
+                    pending_tasks = response_data.get('pending_tasks', [])
+                    if pending_tasks:
+                        logger.info(f"Received {len(pending_tasks)} pending check tasks")
+                        self.task_manager.process_pending_tasks(pending_tasks)
+                except Exception as e:
+                    logger.error(f"Error processing pending tasks: {e}")
+            
             # Reset failure counter on success
             self.consecutive_failures = 0
             
@@ -1051,8 +1168,14 @@ class UptimeSquirrelAgent:
                     except Exception as e:
                         logger.error(f"Failed to send buffered metric: {e}")
             
-            logger.debug(f"Metrics reported successfully")
-            
+            # Log the first success at INFO (so installers can detect a healthy
+            # connection); subsequent successes stay at DEBUG to avoid spam.
+            if not self.first_metrics_reported:
+                self.first_metrics_reported = True
+                logger.info("Metrics reported successfully (connected to API)")
+            else:
+                logger.debug("Metrics reported successfully")
+
         except requests.exceptions.RequestException as e:
             self.consecutive_failures += 1
             logger.error(f"Failed to report metrics (attempt {self.consecutive_failures}): {e}")
@@ -1118,6 +1241,11 @@ class UptimeSquirrelAgent:
         # Initial config fetch
         self.fetch_remote_config()
         
+        # Report capabilities if check execution is enabled
+        if self.task_manager:
+            logger.info("Reporting agent capabilities for check execution")
+            self.task_manager.update_capabilities()
+        
         # Log initial threshold state
         logger.info(f"Starting with thresholds - CPU: {self.get_threshold('cpu', 80.0)}%, Memory: {self.get_threshold('memory', 85.0)}%, Disk: {self.get_threshold('disk', 90.0)}%")
         logger.info(f"Threshold source: {'remote' if self.remote_thresholds else 'local config'}")
@@ -1150,66 +1278,17 @@ def main():
                         help='Check for updates')
     parser.add_argument('--status', action='store_true',
                         help='Show current configuration and exit')
-    parser.add_argument('install-service', nargs='?', default=None,
-                        help='Install systemd service')
     
     args = parser.parse_args()
     
     if args.verbose:
         logger.setLevel(logging.DEBUG)
     
-    # Install systemd service if requested
-    if getattr(args, 'install_service', None) is not None:
-        import subprocess
-        import pkg_resources
-        
-        service_file = pkg_resources.resource_filename('uptimesquirrel_agent', 'systemd/uptimesquirrel-agent.service')
-        
-        print("Installing UptimeSquirrel Agent systemd service...")
-        
-        # Create necessary directories
-        os.makedirs('/etc/uptimesquirrel', exist_ok=True)
-        os.makedirs('/var/lib/uptimesquirrel', exist_ok=True)
-        os.makedirs('/var/log/uptimesquirrel', exist_ok=True)
-        
-        # Copy service file
-        try:
-            subprocess.run(['sudo', 'cp', service_file, '/etc/systemd/system/'], check=True)
-            subprocess.run(['sudo', 'systemctl', 'daemon-reload'], check=True)
-            print("✓ Service file installed")
-            
-            # Create default config if it doesn't exist
-            if not os.path.exists('/etc/uptimesquirrel/agent.conf'):
-                print("\nCreating default configuration file...")
-                default_config = """[api]
-url = https://agent-api.uptimesquirrel.com
-key = YOUR_AGENT_KEY_HERE
-
-[agent]
-interval = 60
-"""
-                with open('/etc/uptimesquirrel/agent.conf', 'w') as f:
-                    f.write(default_config)
-                print("✓ Default configuration created at /etc/uptimesquirrel/agent.conf")
-                print("\n⚠️  IMPORTANT: Edit /etc/uptimesquirrel/agent.conf and add your agent key!")
-            
-            print("\nTo start the service:")
-            print("  sudo systemctl start uptimesquirrel-agent")
-            print("  sudo systemctl enable uptimesquirrel-agent")
-            print("\nTo view logs:")
-            print("  sudo journalctl -u uptimesquirrel-agent -f")
-            
-        except subprocess.CalledProcessError as e:
-            print(f"✗ Failed to install service: {e}")
-            sys.exit(1)
-        
-        sys.exit(0)
-    
     # Check for updates if requested
     if args.check_update:
         print(f"Current version: {__version__}")
         print("To update, run: sudo /opt/uptimesquirrel/update.sh")
-        print("Or manually: sudo curl -sSL https://agent-api.uptimesquirrel.com/agent/update.sh | sudo bash")
+        print("Or manually: sudo curl -sSL https://app.uptimesquirrel.com/downloads/agent/update.sh | sudo bash")
         sys.exit(0)
     
     # Show status if requested

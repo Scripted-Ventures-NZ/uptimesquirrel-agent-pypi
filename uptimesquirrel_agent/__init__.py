@@ -1,11 +1,7 @@
-"""
-UptimeSquirrel Agent - System monitoring agent for UptimeSquirrel
-"""
+"""UptimeSquirrel system monitoring agent."""
+from .agent import UptimeSquirrelAgent, __version__
 
-__version__ = "1.2.7"
-__author__ = "UptimeSquirrel"
+__author__ = "Scripted Ventures"
 __email__ = "support@uptimesquirrel.com"
 
-from .agent import UptimeSquirrelAgent
-
-__all__ = ["UptimeSquirrelAgent"]
+__all__ = ["UptimeSquirrelAgent", "__version__"]
