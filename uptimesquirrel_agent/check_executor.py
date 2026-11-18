@@ -18,6 +18,32 @@ import certifi
 logger = logging.getLogger('uptimesquirrel-agent.executor')
 
 
+
+async def read_bounded_body(response, limit=1024 * 1024):
+    """Bound decoded bytes, including compressed responses, before allocation."""
+    chunks = bytearray()
+    while len(chunks) <= limit:
+        piece = await response.content.read(min(65536, limit + 1 - len(chunks)))
+        if not piece:
+            break
+        chunks.extend(piece)
+    truncated = len(chunks) > limit
+    return bytes(chunks[:limit]).decode('utf-8', errors='replace'), truncated
+
+
+def bounded_integer(value, minimum, maximum, label):
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ValueError(f'{label} outside safe bounds')
+    return value
+
+
+def validate_ping_host(host):
+    import re
+    if (not isinstance(host, str) or len(host) > 253 or host.startswith('-')
+            or not re.fullmatch(r'[A-Za-z0-9_.:%-]+', host)):
+        raise ValueError('Invalid ping host')
+
+
 class CheckExecutor(ABC):
     """Base class for check executors"""
     
@@ -53,8 +79,12 @@ class HTTPExecutor(CheckExecutor):
         
         url = params.get('url')
         method = params.get('method', 'GET')
-        headers = params.get('headers', {})
-        timeout_ms = params.get('timeout_ms', 10000)
+        headers = dict(params.get('headers', {}))
+        from urllib.parse import urlsplit
+        parsed_url = urlsplit(url or '')
+        if parsed_url.scheme not in ('http', 'https') or not parsed_url.hostname or parsed_url.username or parsed_url.password:
+            raise ValueError('HTTP check requires an HTTP(S) URL without embedded credentials')
+        timeout_ms = bounded_integer(params.get('timeout_ms', 10000), 100, 60000, 'timeout_ms')
         skip_ssl = params.get('skip_ssl_verify', False)
         expected_string = params.get('expected_string')
         expected_status = params.get('expected_status', [])
@@ -124,7 +154,8 @@ class HTTPExecutor(CheckExecutor):
                 async with session.request(
                     method=method,
                     url=url,
-                    headers=headers
+                    headers=headers,
+                    allow_redirects=False  # Do not forward custom credentials across redirects
                 ) as response:
                     # Calculate TLS time if HTTPS
                     if tls_start and 'tcp_ms' in timings:
@@ -142,7 +173,11 @@ class HTTPExecutor(CheckExecutor):
                         result['ok'] = 200 <= response.status < 400
                     
                     # Read limited body
-                    body = await response.text()
+                    body, body_truncated = await read_bounded_body(response)
+                    result['metadata'] = {'body_truncated': body_truncated}
+                    if body_truncated and expected_string:
+                        result['ok'] = False
+                        result['error_message'] = 'Response exceeds 1 MiB content-evaluation limit'
                     result['body_excerpt'] = body[:8192] if body else ""
                     
                     # Check for expected string if provided
@@ -152,7 +187,6 @@ class HTTPExecutor(CheckExecutor):
                             result['ok'] = False
                             result['error_message'] = f"Expected string '{expected_string}' not found in response body"
                             # Log for debugging
-                            logger.info(f"Content matching failed. Looking for: '{expected_string}', Body length: {len(body)}, Body preview: {body[:200] if body else 'empty'}")
                     
                     # Add detailed error for non-OK status codes
                     if not result['ok'] and not result.get('error_message'):
@@ -254,9 +288,11 @@ class TCPExecutor(CheckExecutor):
         
         host = params.get('host')
         port = params.get('port')
-        timeout_ms = params.get('timeout_ms', 5000)
+        timeout_ms = bounded_integer(params.get('timeout_ms', 5000), 100, 60000, 'timeout_ms')
         
+        sock = None
         try:
+            bounded_integer(port, 1, 65535, 'port')
             # Create socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(timeout_ms / 1000)
@@ -286,6 +322,10 @@ class TCPExecutor(CheckExecutor):
             result['error_message'] = f"Unexpected error during TCP check: {type(e).__name__}: {str(e)}"
             logger.error(f"TCP check error for {host}:{port}: {e}", exc_info=True)
             
+        finally:
+            if sock is not None:
+                sock.close()
+
         result['finished_at'] = datetime.utcnow().isoformat()
         
         if 'latency_ms' not in result:
@@ -311,9 +351,10 @@ class ICMPExecutor(CheckExecutor):
         }
         
         host = params.get('host')
-        count = params.get('count', 3)
-        timeout_ms = params.get('timeout_ms', 5000)
+        count = bounded_integer(params.get('count', 3), 1, 10, 'ping count')
+        timeout_ms = bounded_integer(params.get('timeout_ms', 5000), 100, 60000, 'timeout_ms')
         
+        validate_ping_host(host)
         try:
             # Use system ping command with platform-specific flags
             import platform
@@ -345,7 +386,13 @@ class ICMPExecutor(CheckExecutor):
                 stderr=asyncio.subprocess.PIPE
             )
 
-            stdout, stderr = await process.communicate()
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=65)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                if process.returncode is None:
+                    process.kill()
+                await process.communicate()
+                raise
 
             if process.returncode == 0:
                 # Parse ping output for stats

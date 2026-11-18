@@ -101,6 +101,45 @@ logging.basicConfig(
 logger = logging.getLogger('uptimesquirrel-agent')
 
 
+class SecureAPISession(requests.Session):
+    """Never send the agent credential to HTTP, another origin or a redirect."""
+    def __init__(self, api_url):
+        super().__init__()
+        from urllib.parse import urlsplit
+        origin = urlsplit(api_url)
+        if (origin.scheme != 'https' or not origin.hostname or origin.username
+                or origin.password or origin.query or origin.fragment
+                or origin.path not in ('', '/')):
+            raise ValueError('Agent API URL must be an HTTPS origin without credentials or path')
+        self._api_origin = (origin.scheme, origin.hostname, origin.port or 443)
+        self.trust_env = False
+        self.verify = True
+
+    def request(self, method, url, **kwargs):
+        from urllib.parse import urlsplit
+        target = urlsplit(url)
+        if ((target.scheme, target.hostname, target.port or 443) != self._api_origin
+                or target.username or target.password):
+            raise ValueError('Agent credential destination is outside the configured HTTPS origin')
+        kwargs['allow_redirects'] = False
+        kwargs['verify'] = True
+        kwargs['stream'] = True
+        response = super().request(method, url, **kwargs)
+        try:
+            if 300 <= response.status_code < 400:
+                raise requests.exceptions.HTTPError('Agent API redirect refused', response=response)
+            content = bytearray()
+            for chunk in response.iter_content(65536):
+                if len(content) + len(chunk) > 2 * 1024 * 1024:
+                    raise requests.exceptions.RequestException('Agent API response exceeds 2 MiB limit')
+                content.extend(chunk)
+            response._content = bytes(content)
+            response._content_consumed = True
+            return response
+        finally:
+            response.close()
+
+
 class MetricCollector:
     """Base class for metric collectors"""
     
@@ -743,7 +782,7 @@ class UptimeSquirrelAgent:
         self._init_snmp_collector()
         
         # Setup HTTP session with retries
-        self.session = requests.Session()
+        self.session = SecureAPISession(self.api_url)
         
         # Configure retry strategy
         retry_strategy = Retry(
